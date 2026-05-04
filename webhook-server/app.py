@@ -28,8 +28,16 @@ def run_qa():
 
     Expects JSON body:
     {
-        "record_id": "recXXXXXXXXXXXXXX",
-        "domain": "example.de"
+       record_id = data.get('record_id')
+domain = data.get('domain', '')
+
+# Strip https:// or http:// prefix if present
+if domain.startswith('https://'):
+    domain = domain[8:]
+elif domain.startswith('http://'):
+    domain = domain[7:]
+# Remove trailing slash
+domain = domain.rstrip('/')
     }
 
     Two-stage write-back (prevents duplicate triggers):
