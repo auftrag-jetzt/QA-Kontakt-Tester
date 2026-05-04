@@ -44,3 +44,6 @@ screenshots/*.png
 ui_report.csv
 data.csv.bak
 *.log
+
+
+COOLIFY_DEPLOYMENT.md
