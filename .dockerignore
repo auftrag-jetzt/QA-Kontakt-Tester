@@ -1,0 +1,13 @@
+.git
+.env
+.env.*
+__pycache__
+*.py[cod]
+*.log
+venv/
+.venv/
+ENV/
+screenshots/*.png
+ui_report.csv
+.vscode/
+.idea/
