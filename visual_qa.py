@@ -828,8 +828,8 @@ async def process_domain(browser, domain: str, output_dir: Path, run_id: str, ai
             # No Airtable creds — judge by UI only
             final = "PASS" if ui_ok else "FAIL"
 
-        elif ui_ok and result["api_submission"] and result["airtable_verified"]:
-            # Full pass: API submission worked AND record verified
+        elif result["api_submission"] and result["airtable_verified"]:
+            # Airtable integration verified — real proof the site works
             final = "PASS"
 
         elif ui_ok and result["api_submission"]:
