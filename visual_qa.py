@@ -698,10 +698,12 @@ async def _run_airtable_checks(page, cfg: dict, test_email: str) -> dict:
 # Per-Domain Runner
 # ─────────────────────────────────────────────────────────────
 
-async def process_domain(browser, domain: str, output_dir: Path, run_id: str) -> dict:
+async def process_domain(browser, domain: str, output_dir: Path, run_id: str, airtable_record_id: str = None) -> dict:
     """
     Open the domain, wait for load, take screenshot, run Gemini analysis,
     attempt contact form submission, then run Airtable checks (B1/B2/C).
+    If airtable_record_id is provided, reads per-site AT credentials from
+    the AT Base ID / AT Table Name / AT API Key fields of that record.
     """
     host, url, _ = _domain_to_urls(domain)
     result = {
@@ -766,7 +768,43 @@ async def process_domain(browser, domain: str, output_dir: Path, run_id: str) ->
         form_ok   = result["form_status"] == "PASS"
 
         # ── Stage 4: Airtable checks (B1 + B2 + C) ───────────
-        at_cfg = {**AIRTABLE_LEADS_CONFIG, "domain": host}
+        # Try to load per-site credentials from the triggering record's
+        # AT Base ID / AT Table Name / AT API Key fields.
+        per_site_base_id    = None
+        per_site_table_name = None
+        per_site_api_key    = None
+
+        if airtable_record_id:
+            try:
+                _rec_url = (
+                    f"https://api.airtable.com/v0/"
+                    f"{AIRTABLE_TRIGGER_CONFIG['base_id']}/"
+                    f"{AIRTABLE_TRIGGER_CONFIG['table_name']}/"
+                    f"{airtable_record_id}"
+                )
+                _rec_resp = requests.get(
+                    _rec_url,
+                    headers=_airtable_headers(AIRTABLE_TRIGGER_CONFIG["api_key"]),
+                    timeout=10,
+                )
+                if _rec_resp.status_code == 200:
+                    _fields = _rec_resp.json().get("fields", {})
+                    per_site_base_id    = (_fields.get("AT Base ID", "") or "").strip() or None
+                    per_site_table_name = (_fields.get("AT Table Name", "") or "").strip() or None
+                    per_site_api_key    = (_fields.get("AT API Key", "") or "").strip() or None
+                    if per_site_base_id:
+                        print(f"  [INFO] Using per-site AT config: {per_site_base_id} / {per_site_table_name}")
+                    else:
+                        print(f"  [INFO] No per-site AT config found — using global AIRTABLE_LEADS config")
+            except Exception as _e:
+                print(f"  [WARN] Could not fetch per-site AT config: {_e}")
+
+        at_cfg = {
+            "api_key":    per_site_api_key    or AIRTABLE_LEADS_CONFIG["api_key"],
+            "base_id":    per_site_base_id    or AIRTABLE_LEADS_CONFIG["base_id"],
+            "table_name": per_site_table_name or AIRTABLE_LEADS_CONFIG["table_name"],
+            "domain":     host,
+        }
         airtable_enabled = bool(at_cfg["api_key"] and at_cfg["base_id"])
         airtable_details = {}
 
@@ -897,7 +935,7 @@ def run_domain(domain: str, airtable_record_id: str = None, run_id: str = None) 
         async with _STEALTH.use_async(async_playwright()) as pw:
             browser = await pw.chromium.launch(headless=True)
             try:
-                return await process_domain(browser, domain, SCREENSHOTS_DIR, run_id)
+                return await process_domain(browser, domain, SCREENSHOTS_DIR, run_id, airtable_record_id)
             finally:
                 await browser.close()
 
