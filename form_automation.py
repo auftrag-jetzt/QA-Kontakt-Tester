@@ -319,18 +319,20 @@ async def _submit_form(page: Page) -> bool:
         return False
 
 
-async def _detect_success(page: Page) -> bool:
+async def _detect_success(page: Page, had_form_before_submit: bool) -> bool:
     """
     Check for a success signal after form submission.
     Uses multiple strategies to detect thank-you messages.
     """
     await page.wait_for_timeout(3_000)  # wait longer for async responses
 
-    # Strategy 1 — look for success text anywhere on page
+    # Strategy 1 — look for explicit post-submit confirmation text.
+    # Keep this narrow; broad static marketing copy can create false passes.
     success_re = re.compile(
-        r"danke|vielen dank|thank you|erfolgreich|success|gesendet|sent"
-        r"|wird bearbeitet|eingegangen|erhalten|bestätigt|confirmed"
-        r"|wir melden|we.ll be in touch|in kürze|shortly|kontaktieren",
+        r"vielen\s+dank|danke\s+(?:f[uü]r|for)|thank\s+you"
+        r"|(?:nachricht|anfrage|formular).{0,40}(?:gesendet|eingegangen|erfolgreich|erhalten)"
+        r"|(?:message|request|form).{0,40}(?:sent|submitted|received|successful)"
+        r"|wir\s+melden\s+uns|we.?ll\s+be\s+in\s+touch|in\s+k[uü]rze",
         re.IGNORECASE,
     )
     try:
@@ -344,7 +346,7 @@ async def _detect_success(page: Page) -> bool:
     # Strategy 2 — check URL for confirmation keywords
     current_url = page.url.lower()
     success_urls = ["danke", "thank", "success", "confirm", "bestaetigung",
-                    "bestätigung", "submitted", "sent", "gesendet"]
+                    "bestätigung", "submitted", "gesendet"]
     if any(kw in current_url for kw in success_urls):
         print(f"  [INFO] Success detected via URL: {current_url}")
         return True
@@ -367,7 +369,7 @@ async def _detect_success(page: Page) -> bool:
     # Strategy 4 — form disappeared (replaced by success message)
     try:
         form_count = await page.locator("form").count()
-        if form_count == 0:
+        if had_form_before_submit and form_count == 0:
             print(f"  [INFO] Form disappeared — likely submitted successfully")
             return True
     except Exception:
@@ -421,12 +423,13 @@ async def submit_form(page: Page, domain: str, run_id: str) -> dict:
             }
 
         # Step 4 — Submit
+        form_count_before_submit = await page.locator("form").count()
         submitted = await _submit_form(page)
         if not submitted:
             return {"status": "FAIL", "error": "Submit button not found"}
 
         # Step 5 — Detect success
-        success = await _detect_success(page)
+        success = await _detect_success(page, form_count_before_submit > 0)
         if success:
             return {"status": "PASS", "error": ""}
         else:

@@ -790,11 +790,11 @@ async def process_domain(browser, domain: str, output_dir: Path, run_id: str) ->
             # No Airtable creds — judge by UI only
             final = "PASS" if ui_ok else "FAIL"
 
-        elif result["api_submission"] and result["airtable_verified"]:
+        elif ui_ok and result["api_submission"] and result["airtable_verified"]:
             # Full pass: API submission worked AND record verified
             final = "PASS"
 
-        elif result["api_submission"]:
+        elif ui_ok and result["api_submission"]:
             # Submitted but couldn't verify — partial
             final = "PARTIAL"
 
@@ -808,7 +808,12 @@ async def process_domain(browser, domain: str, output_dir: Path, run_id: str) ->
 
         result["status"] = final
 
-        if final != "PASS" and not result["error"]:
+        if final == "PASS":
+            result["error"] = ""
+            result["form_error"] = ""
+            result["airtable_error"] = ""
+
+        elif not result["error"]:
             reasons = []
             if result["gemini_status"] not in ("PASS", "SKIPPED"):
                 reasons.append(f"Gemini {result['gemini_status']}: {result['gemini_issues']}")
@@ -900,6 +905,8 @@ def run_domain(domain: str, airtable_record_id: str = None, run_id: str = None) 
 
     if airtable_record_id and AIRTABLE_TRIGGER_CONFIG.get("api_key") and AIRTABLE_TRIGGER_CONFIG.get("base_id"):
         error_msg = result.get("error", "") or result.get("form_error", "")
+        if result["status"] == "PASS":
+            error_msg = ""
         write_qa_result_to_airtable(airtable_record_id, result["status"], error_msg=error_msg)
 
     return result

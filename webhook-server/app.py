@@ -29,6 +29,8 @@ def run_qa_background(domain, record_id):
             or result.get('form_error', '')
             or result.get('airtable_error', '')
         )
+        if final_status == "PASS":
+            error_msg = ""
         logger.info(
             "[BG] QA done: %s | Gemini=%s Form=%s API=%s Verified=%s Error=%s",
             final_status,
