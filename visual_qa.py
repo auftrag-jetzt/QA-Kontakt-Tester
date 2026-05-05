@@ -28,6 +28,7 @@ Output:
 
 import asyncio
 import os
+import re
 import time
 from datetime import datetime
 from pathlib import Path
@@ -83,14 +84,6 @@ NAVIGATION_TIMEOUT = 30_000
 WAIT_AFTER_LOAD    = 2_000
 
 # ── Table A: Lead submissions (B2 test records + C verification) ──────────────
-# This is the table where the pipeline submits a test lead and then verifies
-# it was stored. Unrelated to the trigger that kicks off the QA run.
-#
-# Secrets (api_key) MUST come from environment variables. Non-secret identifiers
-# (base_id, table_name) fall back to defaults so the CLI keeps working without
-# a full env setup. If AIRTABLE_LEADS_API_KEY is unset, the B2/C Airtable steps
-# are skipped — the pipeline still produces screenshots, Gemini analysis, and
-# form-submission results.
 AIRTABLE_LEADS_CONFIG = {
     "api_key":    os.environ.get("AIRTABLE_LEADS_API_KEY", ""),
     "base_id":    os.environ.get("AIRTABLE_LEADS_BASE_ID", "appL4PpAWoTl3rEzE"),
@@ -98,16 +91,10 @@ AIRTABLE_LEADS_CONFIG = {
 }
 
 # ── Table B: Trigger source + QA result write-back ────────────────────────────
-# This is a DIFFERENT table/base. An Airtable automation sends a record_id
-# + domain from here to trigger the QA run, and the PASS/FAIL result is
-# written back to this record.
-#
-# Same rule: api_key from env var, schema fields default to known values.
-# If AIRTABLE_TRIGGER_API_KEY is unset, write-back is skipped.
 AIRTABLE_TRIGGER_CONFIG = {
     "api_key":         os.environ.get("AIRTABLE_TRIGGER_API_KEY", ""),
     "base_id":         os.environ.get("AIRTABLE_TRIGGER_BASE_ID", "apphwncsSpj5PTIFX"),
-    "table_name":      os.environ.get("AIRTABLE_TRIGGER_TABLE", "EMD Webseiten"),
+    "table_name":      os.environ.get("AIRTABLE_TRIGGER_TABLE", "EMD Websiten"),
     "domain_field":    os.environ.get("AIRTABLE_TRIGGER_DOMAIN_FIELD", "Domain"),
     "qa_result_field": os.environ.get("AIRTABLE_TRIGGER_RESULT_FIELD", "Kontakt status"),
     "error_field":     os.environ.get("AIRTABLE_TRIGGER_ERROR_FIELD", "Kontakt error"),
@@ -169,62 +156,61 @@ async def capture_screenshot(page, domain: str, output_dir: Path) -> Path:
 # Part B1 — Frontend JS / Airtable Linkage Check
 # ─────────────────────────────────────────────────────────────
 
-import re
-
 def _normalize_domain(d: str) -> str:
     return d.lower().replace("www.", "").strip().rstrip("/")
 
 
 async def _check_airtable_js_linkage(page, base_url: str) -> dict:
     """
-    Improved B1:
-    - Validates JS existence & structure
-    - Case-insensitive domain match
-    - Extracts Website value safely
+    B1: Search for any JS file on the site that contains Airtable config.
+    Tries multiple common JS paths — no hardcoded filename required.
+    If found, also tries to extract the Airtable token/base for extra validation.
+    B1 failure alone does NOT cause FAIL — B2/C are the real proof.
     """
-    js_url = base_url.rstrip("/") + "/js/airtable-form-handler.js"
     domain = _normalize_domain(urlparse(base_url).netloc)
 
-    try:
-        response = await page.request.get(js_url)
+    # Try multiple possible JS file locations
+    js_paths = [
+        "/js/airtable-form-handler.js",
+        "/js/airtable-form.js",
+        "/js/airtable.js",
+        "/js/form.js",
+        "/js/contact.js",
+        "/js/main.js",
+        "/js/app.js",
+        "/js/script.js",
+    ]
 
-        if response.status != 200:
-            print(f"  [WARN] Airtable handler missing (HTTP {response.status})")
-            return {"linked": False, "details": f"JS handler not found (HTTP {response.status})"}
+    for js_path in js_paths:
+        js_url = base_url.rstrip("/") + js_path
+        try:
+            response = await page.request.get(js_url)
+            if response.status != 200:
+                continue
 
-        js_content = await response.text()
-        js_content_lower = js_content.lower()
+            js_content = await response.text()
+            js_content_lower = js_content.lower()
 
-        # Basic structure validation
-        if "collectformdata" not in js_content_lower:
-            print(f"  [ERROR] 'collectFormData' missing in JS")
-            return {"linked": False, "details": "Invalid JS structure"}
+            # Must contain airtable reference to count
+            if "airtable" not in js_content_lower:
+                continue
 
-        if "website" not in js_content_lower:
-            print(f"  [ERROR] 'Website' field missing in JS")
-            return {"linked": False, "details": "Website field missing"}
+            print(f"  [INFO] Airtable JS found at: {js_path}")
 
-        # Extract Website field
-        match = re.search(r'"Website"\s*:\s*"([^"]+)"', js_content)
+            # Try to extract base ID for extra info (optional)
+            base_match = re.search(r'app[A-Za-z0-9]{14}', js_content)
+            if base_match:
+                print(f"  [INFO] Airtable base ID detected in JS: {base_match.group()}")
 
-        if match:
-            js_domain = _normalize_domain(match.group(1))
+            return {"linked": True, "details": f"Airtable JS found at {js_path}"}
 
-            if js_domain == domain:
-                print(f"  [INFO] Airtable handler detected")
-                print(f"  [INFO] Domain matches JS config")
-                return {"linked": True, "details": "JS valid + domain match"}
-            else:
-                print(f"  [WARN] Domain mismatch (JS={js_domain}, URL={domain})")
-                return {"linked": True, "details": "JS valid but domain mismatch"}
+        except Exception:
+            continue
 
-        # Fallback (still valid)
-        print(f"  [INFO] Airtable handler detected (no explicit domain match)")
-        return {"linked": True, "details": "JS structure valid"}
+    # B1 failed — not critical, B2/C will verify directly
+    print(f"  [WARN] No Airtable JS file found — B2/C checks will verify directly")
+    return {"linked": False, "details": "No Airtable JS found (B2/C will verify)"}
 
-    except Exception as exc:
-        print(f"  [ERROR] Could not fetch Airtable JS handler: {exc}")
-        return {"linked": False, "details": str(exc)}
 
 # ─────────────────────────────────────────────────────────────
 # Part B2 — Direct Airtable API Submission
@@ -238,19 +224,137 @@ def _table_url(cfg: dict) -> str:
     return f"https://api.airtable.com/v0/{cfg['base_id']}/{cfg['table_name']}"
 
 
-async def _send_test_lead_to_airtable(cfg: dict, test_email: str) -> dict:
-    """POST a test record directly to Airtable REST API."""
-    payload = {
-        "records": [{
-            "fields": {
-                "Name":      "QA Test",
-                "E-Mail":    test_email,
-                "Website":   cfg["domain"],
-                "Telefon":   "1234567890",
-                "Nachricht": "Automated QA Test",
-            }
-        }]
+async def _get_table_fields(cfg: dict) -> list[str]:
+    """
+    Fetch the actual field names from the Airtable table so we can
+    submit test data using the correct field names dynamically.
+    Returns list of field names, or empty list on failure.
+    """
+    url = f"https://api.airtable.com/v0/meta/bases/{cfg['base_id']}/tables"
+
+    def _get():
+        return requests.get(
+            url,
+            headers=_airtable_headers(cfg["api_key"]),
+            timeout=15,
+        )
+
+    try:
+        response = await asyncio.to_thread(_get)
+        if response.status_code == 200:
+            tables = response.json().get("tables", [])
+            table_name = cfg.get("table_name", "")
+            for table in tables:
+                if table.get("name") == table_name:
+                    return [f["name"] for f in table.get("fields", [])]
+    except Exception as exc:
+        print(f"  [WARN] Could not fetch table fields: {exc}")
+
+    return []
+
+
+def _build_test_payload(field_names: list[str], test_email: str, domain: str) -> dict:
+    """
+    Build a test record payload that matches the actual field names in the table.
+    Maps common German/English field name variations to test values.
+    """
+    # Mapping: lowercase field name patterns → test values
+    field_map = {
+        # Name variations
+        "name": "QA Test",
+        "vorname": "QA",
+        "nachname": "Test",
+        "firma": "QA Test GmbH",
+        "company": "QA Test GmbH",
+
+        # Email variations
+        "email": test_email,
+        "e-mail": test_email,
+        "mail": test_email,
+
+        # Phone variations
+        "telefon": "1234567890",
+        "phone": "1234567890",
+        "tel": "1234567890",
+        "telefonnummer": "1234567890",
+
+        # Message variations
+        "nachricht": "Automated QA Test",
+        "message": "Automated QA Test",
+        "mitteilung": "Automated QA Test",
+        "anfrage": "Automated QA Test",
+        "kommentar": "Automated QA Test",
+        "beschreibung": "Automated QA Test",
+
+        # Website/domain variations
+        "website": domain,
+        "webseite": domain,
+        "url": domain,
+        "domain": domain,
+
+        # Address variations
+        "adresse": "QA Teststraße 1",
+        "address": "QA Teststraße 1",
+        "straße": "QA Teststraße 1",
+        "strasse": "QA Teststraße 1",
+
+        # City variations
+        "stadt": "Berlin",
+        "city": "Berlin",
+        "ort": "Berlin",
+
+        # PLZ / ZIP
+        "plz": "10115",
+        "postleitzahl": "10115",
+        "zip": "10115",
     }
+
+    fields = {}
+    for field_name in field_names:
+        field_lower = field_name.lower().strip()
+        # Skip computed/readonly fields
+        if field_lower in ("datum", "date", "created", "erstellt", "id"):
+            continue
+        for pattern, value in field_map.items():
+            if pattern in field_lower:
+                fields[field_name] = value
+                break
+
+    # Always ensure we have at least a name and some contact info
+    if not fields:
+        print(f"  [WARN] Could not map any fields, using fallback payload")
+        fields = {"Name": "QA Test"}
+
+    return fields
+
+
+async def _send_test_lead_to_airtable(cfg: dict, test_email: str) -> dict:
+    """
+    POST a test record directly to Airtable REST API.
+    Dynamically detects field names so it works with any website's table.
+    """
+    domain = cfg.get("domain", "qa-test.de")
+
+    # Try to get actual field names from the table
+    field_names = await _get_table_fields(cfg)
+
+    if field_names:
+        print(f"  [INFO] Detected {len(field_names)} fields in table: {field_names[:5]}...")
+        fields = _build_test_payload(field_names, test_email, domain)
+    else:
+        # Fallback to common field names if metadata fetch failed
+        print(f"  [WARN] Using fallback field names")
+        fields = {
+            "Name":      "QA Test",
+            "E-Mail":    test_email,
+            "Website":   domain,
+            "Telefon":   "1234567890",
+            "Nachricht": "Automated QA Test",
+        }
+
+    print(f"  [INFO] Submitting test record with fields: {list(fields.keys())}")
+
+    payload = {"records": [{"fields": fields}]}
 
     def _post():
         return requests.post(
@@ -265,10 +369,10 @@ async def _send_test_lead_to_airtable(cfg: dict, test_email: str) -> dict:
         if response.status_code in (200, 201):
             record_id = response.json()["records"][0]["id"]
             print(f"  [INFO] Airtable API submission successful (record: {record_id})")
-            return {"success": True, "record_id": record_id, "details": "Record created"}
+            return {"success": True, "record_id": record_id, "details": "Record created", "test_email": test_email}
 
         print(f"  [ERROR] Airtable API failed (HTTP {response.status_code}): {response.text[:200]}")
-        return {"success": False, "record_id": None, "details": f"HTTP {response.status_code}"}
+        return {"success": False, "record_id": None, "details": f"HTTP {response.status_code}: {response.text[:100]}"}
 
     except Exception as exc:
         print(f"  [ERROR] Airtable API exception: {exc}")
@@ -281,49 +385,47 @@ async def _send_test_lead_to_airtable(cfg: dict, test_email: str) -> dict:
 
 async def _verify_airtable_entry(cfg: dict, test_email: str) -> dict:
     """
-    Fixed:
-    - Uses FIND() instead of strict equality
-    - Handles Airtable quirks
-    - Better logging
+    Poll Airtable to confirm the test record exists.
+    Tries multiple email field name variations since field names differ per website.
     """
+    # Try multiple possible email field names
+    email_field_variants = ["E-Mail", "Email", "email", "e-mail", "Mail", "mail"]
 
-    params = {
-        "filterByFormula": f"FIND('{test_email}', {{E-Mail}})"
-    }
-
-    def _get():
+    def _get(filter_formula):
         return requests.get(
             _table_url(cfg),
             headers=_airtable_headers(cfg["api_key"]),
-            params=params,
+            params={"filterByFormula": filter_formula},
             timeout=15,
         )
 
     for attempt in range(1, _AT_RETRY_COUNT + 1):
-        try:
-            response = await asyncio.to_thread(_get)
+        # Try each email field name variant
+        for email_field in email_field_variants:
+            try:
+                filter_formula = f"FIND('{test_email}', {{{email_field}}})"
+                response = await asyncio.to_thread(_get, filter_formula)
 
-            if response.status_code == 200:
-                data = response.json()
-                records = data.get("records", [])
+                if response.status_code == 200:
+                    records = response.json().get("records", [])
+                    if records:
+                        print(f"  [INFO] Airtable record verified via field '{email_field}' (attempt {attempt})")
+                        return {"verified": True, "details": f"Found {len(records)} record(s)"}
+                elif response.status_code == 422:
+                    # Field doesn't exist — try next variant
+                    continue
 
-                if records:
-                    print(f"  [INFO] Airtable record verified (attempt {attempt})")
-                    return {"verified": True, "details": f"Found {len(records)} record(s)"}
+            except Exception as exc:
+                print(f"  [WARN] Verification error with field '{email_field}': {exc}")
+                continue
 
-                print(f"  [WARN] Record not found yet (attempt {attempt}), retrying...")
-
-            else:
-                print(f"  [WARN] Verification HTTP {response.status_code}: {response.text[:100]}")
-
-        except Exception as exc:
-            print(f"  [WARN] Verification error: {exc}")
-
+        print(f"  [WARN] Record not found yet (attempt {attempt}/{_AT_RETRY_COUNT}), retrying...")
         if attempt < _AT_RETRY_COUNT:
             await asyncio.sleep(_AT_RETRY_DELAY)
 
-    print(f"  [ERROR] Airtable record not found after retries")
-    return {"verified": False, "details": "Not found"}
+    print(f"  [ERROR] Airtable record not found after {_AT_RETRY_COUNT} attempts")
+    return {"verified": False, "details": "Record not found after retries"}
+
 
 # ─────────────────────────────────────────────────────────────
 # Write-back — update the triggering Airtable record with QA result
@@ -332,9 +434,7 @@ async def _verify_airtable_entry(cfg: dict, test_email: str) -> dict:
 def _map_status_to_airtable(internal_status: str) -> str:
     """
     Map internal QA status to Airtable field value.
-
-    Internal: PASS, PARTIAL, FAIL
-    Airtable: passed, failed
+    Internal: PASS, PARTIAL, FAIL → Airtable: passed, failed
     """
     if internal_status == "PASS":
         return "passed"
@@ -343,15 +443,7 @@ def _map_status_to_airtable(internal_status: str) -> str:
 
 def write_qa_result_to_airtable(record_id: str, status: str, cfg: dict = None, error_msg: str = "") -> bool:
     """
-    PATCH the Airtable record that triggered this QA run with the final verdict and optional error details.
-
-    Args:
-        record_id:  Airtable record ID, e.g. "recXXXXXXXXXXXXXX"
-        status:     "PASS", "PARTIAL", or "FAIL" (internal status)
-        cfg:        Airtable config dict; defaults to AIRTABLE_TRIGGER_CONFIG
-        error_msg:  Optional error message to write to error field
-
-    Returns True on success, False on failure.
+    PATCH the Airtable record that triggered this QA run with the final verdict.
     """
     if cfg is None:
         cfg = AIRTABLE_TRIGGER_CONFIG
@@ -364,12 +456,12 @@ def write_qa_result_to_airtable(record_id: str, status: str, cfg: dict = None, e
     airtable_status = _map_status_to_airtable(status)
     url = f"https://api.airtable.com/v0/{cfg['base_id']}/{cfg['table_name']}/{record_id}"
 
-    # Build payload: always include status, optionally include error message
     payload = {"fields": {field: airtable_status}}
 
     error_field = cfg.get("error_field")
-    if error_msg and error_field:
-        payload["fields"][error_field] = error_msg[:500]  # Limit to 500 chars
+    if error_field:
+        # Always write error field — clear it on pass, set it on fail
+        payload["fields"][error_field] = error_msg[:500] if error_msg else ""
 
     try:
         response = requests.patch(
@@ -379,10 +471,7 @@ def write_qa_result_to_airtable(record_id: str, status: str, cfg: dict = None, e
             timeout=15,
         )
         if response.status_code == 200:
-            msg = f"record {record_id} → {field} = {airtable_status}"
-            if error_msg and error_field:
-                msg += f", {error_field} = {error_msg[:50]}..."
-            print(f"  [INFO] Write-back OK: {msg}")
+            print(f"  [INFO] Write-back OK: record {record_id} → {airtable_status}")
             return True
         print(f"  [ERROR] Write-back failed (HTTP {response.status_code}): {response.text[:200]}")
         return False
@@ -394,13 +483,7 @@ def write_qa_result_to_airtable(record_id: str, status: str, cfg: dict = None, e
 def set_status_to_testing(record_id: str, cfg: dict = None) -> bool:
     """
     Set Airtable record status to 'testing' immediately when QA starts.
-    Prevents duplicate triggers (automation only fires on 'to be tested').
-
-    Args:
-        record_id: Airtable record ID
-        cfg: Airtable config dict; defaults to AIRTABLE_TRIGGER_CONFIG
-
-    Returns True on success, False on failure.
+    Prevents duplicate triggers.
     """
     if cfg is None:
         cfg = AIRTABLE_TRIGGER_CONFIG
@@ -462,8 +545,6 @@ async def process_domain(browser, domain: str, output_dir: Path, run_id: str) ->
     """
     Open the domain, wait for load, take screenshot, run Gemini analysis,
     attempt contact form submission, then run Airtable checks (B1/B2/C).
-
-    Returns a result dict with keys matching _REPORT_COLUMNS.
     """
     url = f"https://{domain}"
     result = {
@@ -482,7 +563,6 @@ async def process_domain(browser, domain: str, output_dir: Path, run_id: str) ->
 
     context = None
     try:
-        # Isolated browser context per domain (clean cookies/cache)
         context = await browser.new_context(
             viewport={"width": 1440, "height": 900},
             user_agent=(
@@ -539,24 +619,31 @@ async def process_domain(browser, domain: str, output_dir: Path, run_id: str) ->
             result["api_submission"]    = at["api_submission"]
             result["airtable_verified"] = at["airtable_verified"]
         else:
-            print(f"  -- Airtable checks skipped (AIRTABLE_API_KEY / AIRTABLE_BASE_ID not set)")
+            print(f"  -- Airtable checks skipped (AIRTABLE_LEADS_API_KEY not set)")
 
         # ── Final status ──────────────────────────────────────
+        # B1 (JS check) is informational only — does not affect final status
+        # B2 + C are the real Airtable verification
         ui_ok = gemini_ok and form_ok
 
         if not airtable_enabled:
+            # No Airtable creds — judge by UI only
             final = "PASS" if ui_ok else "FAIL"
 
         elif result["api_submission"] and result["airtable_verified"]:
+            # Full pass: API submission worked AND record verified
             final = "PASS"
 
         elif result["api_submission"]:
+            # Submitted but couldn't verify — partial
             final = "PARTIAL"
 
         elif ui_ok:
+            # UI ok but Airtable submission failed — partial
             final = "PARTIAL"
 
         else:
+            # Everything failed
             final = "FAIL"
 
         result["status"] = final
@@ -619,25 +706,6 @@ async def run_qa(domains: list[str], run_id: str) -> list[dict]:
 def run_domain(domain: str, airtable_record_id: str = None, run_id: str = None) -> dict:
     """
     Public synchronous entry point — test a single domain end-to-end.
-
-    Intended for external callers (webhook server, polling script, Airtable
-    automation, etc.) that want to trigger a QA run without dealing with the
-    async internals.
-
-    Args:
-        domain:              Bare domain, e.g. "fensterreinigung-ulm.de".
-                             The "https://" prefix is added automatically.
-        airtable_record_id:  When provided the final QA status (PASS / PARTIAL
-                             / FAIL) is written back to this Airtable record
-                             in the field defined by AIRTABLE_CONFIG['qa_status_field'].
-        run_id:              Optional identifier used for unique test e-mails
-                             and screenshot naming; auto-generated if omitted.
-
-    Returns:
-        dict with keys matching _REPORT_COLUMNS:
-            domain, status, screenshot, gemini_status, gemini_issues,
-            form_status, form_error, airtable_linked, api_submission,
-            airtable_verified, error
     """
     if run_id is None:
         run_id = f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
@@ -667,7 +735,6 @@ def run_domain(domain: str, airtable_record_id: str = None, run_id: str = None) 
 
 def main():
     start = datetime.now()
-
     run_id = f"run_{start.strftime('%Y%m%d_%H%M%S')}"
 
     domains = load_domains(INPUT_CSV)
