@@ -236,11 +236,11 @@ def _table_url(cfg: dict) -> str:
     return f"https://api.airtable.com/v0/{cfg['base_id']}/{cfg['table_name']}"
 
 
-async def _get_table_fields(cfg: dict) -> list[str]:
+async def _get_table_fields(cfg: dict) -> list[dict]:
     """
-    Fetch the actual field names from the Airtable table so we can
-    submit test data using the correct field names dynamically.
-    Returns list of field names, or empty list on failure.
+    Fetch the actual Airtable fields so test data can be sent using
+    compatible field names and field types.
+    Returns Airtable field metadata dicts, or an empty list on failure.
     """
     url = f"https://api.airtable.com/v0/meta/bases/{cfg['base_id']}/tables"
 
@@ -258,17 +258,87 @@ async def _get_table_fields(cfg: dict) -> list[str]:
             table_name = cfg.get("table_name", "")
             for table in tables:
                 if table.get("name") == table_name:
-                    return [f["name"] for f in table.get("fields", [])]
+                    return table.get("fields", [])
+        print(
+            f"  [WARN] Could not fetch table fields "
+            f"(HTTP {response.status_code}) for base={cfg.get('base_id')} "
+            f"table={cfg.get('table_name')}: {response.text[:120]}"
+        )
     except Exception as exc:
         print(f"  [WARN] Could not fetch table fields: {exc}")
 
     return []
 
 
-def _build_test_payload(field_names: list[str], test_email: str, domain: str) -> dict:
+def _field_name(field) -> str:
+    if isinstance(field, dict):
+        return field.get("name", "")
+    return str(field)
+
+
+def _field_type(field) -> str:
+    if isinstance(field, dict):
+        return field.get("type", "")
+    return ""
+
+
+def _is_readonly_or_complex_field(field) -> bool:
+    field_type = _field_type(field)
+    return field_type in {
+        "aiText",
+        "autoNumber",
+        "barcode",
+        "button",
+        "count",
+        "createdBy",
+        "createdTime",
+        "externalSyncSource",
+        "formula",
+        "lastModifiedBy",
+        "lastModifiedTime",
+        "lookup",
+        "multipleAttachments",
+        "multipleLookupValues",
+        "multipleRecordLinks",
+        "rollup",
+    }
+
+
+def _coerce_airtable_value(field, value):
+    """Return a value Airtable can parse for this field type, or None to skip."""
+    if _is_readonly_or_complex_field(field):
+        return None
+
+    field_type = _field_type(field)
+
+    if field_type == "url":
+        text = str(value)
+        if text.startswith(("http://", "https://")):
+            return text
+        return f"https://{text}"
+
+    if field_type in ("", "singleLineText", "multilineText", "richText", "email", "phoneNumber"):
+        return str(value)
+
+    if field_type in ("number", "currency", "percent", "duration", "rating"):
+        digits = re.sub(r"[^\d.]", "", str(value))
+        if not digits:
+            return None
+        try:
+            number = float(digits)
+            return int(number) if number.is_integer() else number
+        except ValueError:
+            return None
+
+    # Select/link/date/checkbox fields often have constrained schemas. They are
+    # not required for this synthetic QA record, so skip them instead of guessing.
+    return None
+
+
+def _build_test_payload(table_fields: list, test_email: str, domain: str) -> dict:
     """
-    Build a test record payload that matches the actual field names in the table.
-    Maps common German/English field name variations to test values.
+    Build a test record payload that matches the actual field metadata.
+    Only writes fields Airtable can parse safely.
     """
     # Mapping: lowercase field name patterns → test values
     field_map = {
@@ -294,7 +364,6 @@ def _build_test_payload(field_names: list[str], test_email: str, domain: str) ->
         "nachricht": "Automated QA Test",
         "message": "Automated QA Test",
         "mitteilung": "Automated QA Test",
-        "anfrage": "Automated QA Test",
         "kommentar": "Automated QA Test",
         "beschreibung": "Automated QA Test",
 
@@ -322,14 +391,22 @@ def _build_test_payload(field_names: list[str], test_email: str, domain: str) ->
     }
 
     fields = {}
-    for field_name in field_names:
+    for field in table_fields:
+        field_name = _field_name(field)
+        field_type = _field_type(field)
         field_lower = field_name.lower().strip()
+
         # Skip computed/readonly fields
-        if field_lower in ("datum", "date", "created", "erstellt", "id"):
+        if field_lower in ("datum", "date", "created", "erstellt", "id") or _is_readonly_or_complex_field(field):
             continue
+
         for pattern, value in field_map.items():
             if pattern in field_lower:
-                fields[field_name] = value
+                coerced = _coerce_airtable_value(field, value)
+                if coerced is not None:
+                    fields[field_name] = coerced
+                elif field_type:
+                    print(f"  [INFO] Skipping field '{field_name}' ({field_type}) - incompatible test value")
                 break
 
     # Always ensure we have at least a name and some contact info
@@ -347,12 +424,14 @@ async def _send_test_lead_to_airtable(cfg: dict, test_email: str) -> dict:
     """
     domain = cfg.get("domain", "qa-test.de")
 
-    # Try to get actual field names from the table
-    field_names = await _get_table_fields(cfg)
+    # Try to get actual field metadata from the table
+    table_fields = await _get_table_fields(cfg)
+    field_names = [_field_name(field) for field in table_fields]
 
-    if field_names:
-        print(f"  [INFO] Detected {len(field_names)} fields in table: {field_names[:5]}...")
-        fields = _build_test_payload(field_names, test_email, domain)
+    if table_fields:
+        preview = [f"{_field_name(field)}:{_field_type(field) or 'unknown'}" for field in table_fields[:5]]
+        print(f"  [INFO] Detected {len(table_fields)} fields in table: {preview}...")
+        fields = _build_test_payload(table_fields, test_email, domain)
     else:
         # Fallback to common field names if metadata fetch failed
         print(f"  [WARN] Using fallback field names")
@@ -391,10 +470,18 @@ async def _send_test_lead_to_airtable(cfg: dict, test_email: str) -> dict:
             }
 
         print(f"  [ERROR] Airtable API failed (HTTP {response.status_code}): {response.text[:200]}")
+        if response.status_code == 401:
+            details = (
+                "AIRTABLE_LEADS_API_KEY is missing/invalid in the QA webhook server, "
+                f"or it is not a valid token for base {cfg.get('base_id')} "
+                f"table {cfg.get('table_name')}"
+            )
+        else:
+            details = f"HTTP {response.status_code}: {response.text[:100]}"
         return {
             "success": False,
             "record_id": None,
-            "details": f"HTTP {response.status_code}: {response.text[:100]}",
+            "details": details,
             "field_names": field_names,
             "submitted_fields": list(fields.keys()),
         }
