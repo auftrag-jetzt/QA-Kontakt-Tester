@@ -324,7 +324,7 @@ async def _detect_success(page: Page, had_form_before_submit: bool) -> bool:
     Check for a success signal after form submission.
     Uses multiple strategies to detect thank-you messages.
     """
-    await page.wait_for_timeout(3_000)  # wait longer for async responses
+    await page.wait_for_timeout(6_000)  # wait longer for async responses
 
     # Strategy 1 — look for explicit post-submit confirmation text.
     # Keep this narrow; broad static marketing copy can create false passes.
@@ -355,6 +355,7 @@ async def _detect_success(page: Page, had_form_before_submit: bool) -> bool:
     try:
         success_div = page.locator(
             ".success, .alert-success, .form-success, "
+            ".w-form-done, [class*='w-form-done'], "
             "[class*='success'], [class*='danke'], "
             "[id*='success'], [id*='danke'], "
             ".wpcf7-response-output, .contact-success"
