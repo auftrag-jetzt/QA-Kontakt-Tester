@@ -22,7 +22,11 @@ def run_qa_background(domain, record_id):
     """Run the full QA pipeline in a background thread."""
     try:
         logger.info(f"[BG] Starting QA for {domain} / {record_id}")
-        result = run_domain(domain)
+
+        # Pass record_id so process_domain can read per-site AT credentials
+        # from the AT Base ID / AT Table Name / AT API Key fields of that record.
+        result = run_domain(domain, airtable_record_id=record_id)
+
         final_status = result.get('status', 'FAIL')
         error_msg = (
             result.get('error', '')
