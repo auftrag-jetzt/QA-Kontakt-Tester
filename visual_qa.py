@@ -944,7 +944,7 @@ def run_domain(domain: str, airtable_record_id: str = None, run_id: str = None) 
     if airtable_record_id and AIRTABLE_TRIGGER_CONFIG.get("api_key") and AIRTABLE_TRIGGER_CONFIG.get("base_id"):
         error_msg = result.get("error", "") or result.get("form_error", "")
         if result["status"] == "PASS":
-            error_msg = ""
+            error_msg = "✅ Kontakt form & Airtable integration verified successfully"
         write_qa_result_to_airtable(airtable_record_id, result["status"], error_msg=error_msg)
 
     return result
