@@ -16,6 +16,7 @@ Usage:
 """
 
 import re
+from urllib.parse import urlparse
 
 from playwright.async_api import Page, TimeoutError as PlaywrightTimeoutError
 
@@ -65,6 +66,14 @@ _CONTACT_PATHS = [
 # ─────────────────────────────────────────────────────────────
 # Internal Helpers
 # ─────────────────────────────────────────────────────────────
+
+def _base_url_from_domain(domain: str) -> str:
+    """Return scheme + host even when Airtable sends a full page URL."""
+    raw = domain.strip()
+    parsed = urlparse(raw if raw.startswith(("http://", "https://")) else f"https://{raw}")
+    host = parsed.netloc or parsed.path.split("/", 1)[0]
+    return f"https://{host}"
+
 
 async def _navigate_to_contact(page: Page, base_url: str) -> bool:
     """
@@ -386,7 +395,7 @@ async def submit_form(page: Page, domain: str, run_id: str) -> dict:
             "error":  str   (empty string on success)
         }
     """
-    base_url = f"https://{domain}"
+    base_url = _base_url_from_domain(domain)
     message  = f"QA Test - run_id={run_id}"
 
     try:

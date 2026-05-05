@@ -26,6 +26,9 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /app
 
+# Flush QA pipeline logs immediately so Coolify shows the real failing stage.
+ENV PYTHONUNBUFFERED=1
+
 # Copy everything (webhook-server/app.py imports from parent dir)
 COPY . .
 
@@ -38,5 +41,5 @@ RUN playwright install chromium
 
 EXPOSE 5000
 
-# gunicorn with long timeout (QA runs take 30-120 seconds per domain)
-CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--timeout", "600", "--workers", "2", "webhook-server.app:app"]
+# gunicorn with threads so webhook requests return while QA keeps running.
+CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--timeout", "600", "--workers", "2", "--worker-class", "gthread", "--threads", "4", "webhook-server.app:app"]

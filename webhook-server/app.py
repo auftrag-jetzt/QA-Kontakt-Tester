@@ -22,10 +22,22 @@ def run_qa_background(domain, record_id):
     """Run the full QA pipeline in a background thread."""
     try:
         logger.info(f"[BG] Starting QA for {domain} / {record_id}")
-        result = run_domain(domain, airtable_record_id=record_id)
+        result = run_domain(domain)
         final_status = result.get('status', 'FAIL')
-        error_msg = result.get('error', '') or result.get('form_error', '')
-        logger.info(f"[BG] QA done: {final_status}")
+        error_msg = (
+            result.get('error', '')
+            or result.get('form_error', '')
+            or result.get('airtable_error', '')
+        )
+        logger.info(
+            "[BG] QA done: %s | Gemini=%s Form=%s API=%s Verified=%s Error=%s",
+            final_status,
+            result.get('gemini_status'),
+            result.get('form_status'),
+            result.get('api_submission'),
+            result.get('airtable_verified'),
+            error_msg or "",
+        )
         write_qa_result_to_airtable(record_id, final_status, error_msg=error_msg)
     except Exception as e:
         logger.error(f"[BG] Pipeline error: {e}", exc_info=True)

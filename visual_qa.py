@@ -130,7 +130,7 @@ _REPORT_COLUMNS = [
     "gemini_status", "gemini_issues",
     "form_status", "form_error",
     "airtable_linked", "api_submission", "airtable_verified",
-    "error",
+    "airtable_error", "error",
 ]
 
 
@@ -147,9 +147,21 @@ def save_report(results: list[dict], filepath: str) -> None:
 
 async def capture_screenshot(page, domain: str, output_dir: Path) -> Path:
     """Take a full-page screenshot and return the file path."""
-    filename = output_dir / f"{domain}.png"
+    safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", domain.strip()).strip("_") or "screenshot"
+    filename = output_dir / f"{safe_name}.png"
     await page.screenshot(path=str(filename), full_page=True)
     return filename
+
+
+def _domain_to_urls(domain: str) -> tuple[str, str, str]:
+    """Return (host, target_url, base_url) for bare domains or full page URLs."""
+    raw = domain.strip()
+    parsed = urlparse(raw if raw.startswith(("http://", "https://")) else f"https://{raw}")
+    host = parsed.netloc or parsed.path.split("/", 1)[0]
+    path = parsed.path if parsed.netloc else ""
+    target_url = f"https://{host}{path if path != '/' else ''}"
+    base_url = f"https://{host}"
+    return host, target_url, base_url
 
 
 # ─────────────────────────────────────────────────────────────
@@ -369,27 +381,76 @@ async def _send_test_lead_to_airtable(cfg: dict, test_email: str) -> dict:
         if response.status_code in (200, 201):
             record_id = response.json()["records"][0]["id"]
             print(f"  [INFO] Airtable API submission successful (record: {record_id})")
-            return {"success": True, "record_id": record_id, "details": "Record created", "test_email": test_email}
+            return {
+                "success": True,
+                "record_id": record_id,
+                "details": "Record created",
+                "test_email": test_email,
+                "field_names": field_names,
+                "submitted_fields": list(fields.keys()),
+            }
 
         print(f"  [ERROR] Airtable API failed (HTTP {response.status_code}): {response.text[:200]}")
-        return {"success": False, "record_id": None, "details": f"HTTP {response.status_code}: {response.text[:100]}"}
+        return {
+            "success": False,
+            "record_id": None,
+            "details": f"HTTP {response.status_code}: {response.text[:100]}",
+            "field_names": field_names,
+            "submitted_fields": list(fields.keys()),
+        }
 
     except Exception as exc:
         print(f"  [ERROR] Airtable API exception: {exc}")
-        return {"success": False, "record_id": None, "details": str(exc)}
+        return {
+            "success": False,
+            "record_id": None,
+            "details": str(exc),
+            "field_names": field_names,
+            "submitted_fields": list(fields.keys()),
+        }
 
 
 # ─────────────────────────────────────────────────────────────
 # Part C — Airtable Record Verification
 # ─────────────────────────────────────────────────────────────
 
-async def _verify_airtable_entry(cfg: dict, test_email: str) -> dict:
+async def _verify_airtable_entry(
+    cfg: dict,
+    test_email: str,
+    record_id: str = None,
+    field_names: list[str] = None,
+) -> dict:
     """
     Poll Airtable to confirm the test record exists.
     Tries multiple email field name variations since field names differ per website.
     """
-    # Try multiple possible email field names
-    email_field_variants = ["E-Mail", "Email", "email", "e-mail", "Mail", "mail"]
+    if record_id:
+        def _get_record():
+            return requests.get(
+                f"{_table_url(cfg)}/{record_id}",
+                headers=_airtable_headers(cfg["api_key"]),
+                timeout=15,
+            )
+
+        try:
+            response = await asyncio.to_thread(_get_record)
+            if response.status_code == 200:
+                print(f"  [INFO] Airtable record verified by ID: {record_id}")
+                return {"verified": True, "details": f"Record {record_id} readable by ID"}
+            print(f"  [WARN] Record ID verification failed (HTTP {response.status_code}): {response.text[:120]}")
+        except Exception as exc:
+            print(f"  [WARN] Record ID verification error: {exc}")
+
+    # Try exact detected e-mail fields first, then common fallbacks.
+    email_field_variants = []
+    for field_name in field_names or []:
+        field_lower = field_name.lower()
+        if ("mail" in field_lower or "email" in field_lower) and field_name not in email_field_variants:
+            email_field_variants.append(field_name)
+    for fallback in ["E-Mail", "Email", "email", "e-mail", "Mail", "mail"]:
+        if fallback not in email_field_variants:
+            email_field_variants.append(fallback)
+    safe_email = test_email.replace('"', '\\"')
 
     def _get(filter_formula):
         return requests.get(
@@ -403,7 +464,7 @@ async def _verify_airtable_entry(cfg: dict, test_email: str) -> dict:
         # Try each email field name variant
         for email_field in email_field_variants:
             try:
-                filter_formula = f"FIND('{test_email}', {{{email_field}}})"
+                filter_formula = f'FIND("{safe_email}", {{{email_field}}})'
                 response = await asyncio.to_thread(_get, filter_formula)
 
                 if response.status_code == 200:
@@ -525,7 +586,12 @@ async def _run_airtable_checks(page, cfg: dict, test_email: str) -> dict:
     b2 = await _send_test_lead_to_airtable(cfg, test_email)
 
     if b2["success"]:
-        c = await _verify_airtable_entry(cfg, test_email)
+        c = await _verify_airtable_entry(
+            cfg,
+            test_email,
+            record_id=b2.get("record_id"),
+            field_names=b2.get("field_names"),
+        )
     else:
         print("  [WARN] Skipping record verification — API submission failed")
         c = {"verified": False, "details": "Skipped: B2 failed"}
@@ -534,6 +600,10 @@ async def _run_airtable_checks(page, cfg: dict, test_email: str) -> dict:
         "airtable_linked":   b1["linked"],
         "api_submission":    b2["success"],
         "airtable_verified": c["verified"],
+        "b1_details":        b1.get("details", ""),
+        "b2_details":        b2.get("details", ""),
+        "c_details":         c.get("details", ""),
+        "record_id":         b2.get("record_id"),
     }
 
 
@@ -546,7 +616,7 @@ async def process_domain(browser, domain: str, output_dir: Path, run_id: str) ->
     Open the domain, wait for load, take screenshot, run Gemini analysis,
     attempt contact form submission, then run Airtable checks (B1/B2/C).
     """
-    url = f"https://{domain}"
+    host, url, _ = _domain_to_urls(domain)
     result = {
         "domain":            domain,
         "status":            "FAIL",
@@ -558,6 +628,7 @@ async def process_domain(browser, domain: str, output_dir: Path, run_id: str) ->
         "airtable_linked":   None,
         "api_submission":    None,
         "airtable_verified": None,
+        "airtable_error":    "",
         "error":             "",
     }
 
@@ -608,13 +679,15 @@ async def process_domain(browser, domain: str, output_dir: Path, run_id: str) ->
         form_ok   = result["form_status"] == "PASS"
 
         # ── Stage 4: Airtable checks (B1 + B2 + C) ───────────
-        at_cfg = {**AIRTABLE_LEADS_CONFIG, "domain": domain}
+        at_cfg = {**AIRTABLE_LEADS_CONFIG, "domain": host}
         airtable_enabled = bool(at_cfg["api_key"] and at_cfg["base_id"])
+        airtable_details = {}
 
         if airtable_enabled:
             print(f"  >> Running Airtable checks (B1 / B2 / C)...")
             test_email = f"qa+{run_id}@test.com"
             at = await _run_airtable_checks(page, at_cfg, test_email)
+            airtable_details = at
             result["airtable_linked"]   = at["airtable_linked"]
             result["api_submission"]    = at["api_submission"]
             result["airtable_verified"] = at["airtable_verified"]
@@ -647,6 +720,22 @@ async def process_domain(browser, domain: str, output_dir: Path, run_id: str) ->
             final = "FAIL"
 
         result["status"] = final
+
+        if final != "PASS" and not result["error"]:
+            reasons = []
+            if result["gemini_status"] not in ("PASS", "SKIPPED"):
+                reasons.append(f"Gemini {result['gemini_status']}: {result['gemini_issues']}")
+            if result["form_status"] != "PASS" and result["form_error"]:
+                reasons.append(f"Form failed: {result['form_error']}")
+            if airtable_enabled:
+                if not result["api_submission"]:
+                    reasons.append(f"Airtable API submission failed: {airtable_details.get('b2_details', 'no details')}")
+                elif not result["airtable_verified"]:
+                    reasons.append(f"Airtable verification failed: {airtable_details.get('c_details', 'no details')}")
+            if reasons:
+                result["error"] = " | ".join(reasons)[:500]
+                result["airtable_error"] = result["error"]
+
         print(
             f"  [OK] Done -- Gemini: {result['gemini_status']} | "
             f"Form: {result['form_status']} | "
