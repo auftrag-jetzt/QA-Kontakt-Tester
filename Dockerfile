@@ -39,4 +39,4 @@ RUN playwright install chromium
 EXPOSE 5000
 
 # gunicorn with long timeout (QA runs take 30-120 seconds per domain)
-CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--timeout", "600", "--workers", "1", "webhook-server.app:app"]
+CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--timeout", "600", "--workers", "2", "webhook-server.app:app"]
