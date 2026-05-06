@@ -768,24 +768,60 @@ async def process_domain(browser, domain: str, output_dir: Path, run_id: str, ai
         form_ok   = result["form_status"] == "PASS"
 
         # ── Stage 4: Airtable checks (B1 + B2 + C) ───────────
-        # Central Leads Partner table used for all websites.
-        # B1: checks for Airtable JS on the site (informational only)
-        # B2: submits test record directly via API to Leads Partner
-        # C:  verifies test record was stored successfully
         at_cfg = {**AIRTABLE_LEADS_CONFIG, "domain": host}
         airtable_enabled = bool(at_cfg["api_key"] and at_cfg["base_id"])
-        airtable_details = {}
 
-        if airtable_enabled:
-            print(f"  >> Running Airtable checks (B1 / B2 / C)...")
-            test_email = f"qa+{run_id}@test.com"
-            at = await _run_airtable_checks(page, at_cfg, test_email)
-            airtable_details = at
-            result["airtable_linked"]   = at["airtable_linked"]
-            result["api_submission"]    = at["api_submission"]
-            result["airtable_verified"] = at["airtable_verified"]
-        else:
-            print(f"  -- Airtable checks skipped (AIRTABLE_LEADS_API_KEY not set)")
+        # ── Stage 4: Airtable checks (B1 + B2 + C) ───────────
+        # Try to load per-site credentials from the triggering record's
+        # AT Base ID / AT Table Name / AT API Key fields.
+        # per_site_base_id    = None
+        # per_site_table_name = None
+        # per_site_api_key    = None
+
+        # if airtable_record_id:
+        #     try:
+        #         _rec_url = (
+        #             f"https://api.airtable.com/v0/"
+        #             f"{AIRTABLE_TRIGGER_CONFIG['base_id']}/"
+        #             f"{AIRTABLE_TRIGGER_CONFIG['table_name']}/"
+        #             f"{airtable_record_id}"
+        #         )
+        #         _rec_resp = requests.get(
+        #             _rec_url,
+        #             headers=_airtable_headers(AIRTABLE_TRIGGER_CONFIG["api_key"]),
+        #             timeout=10,
+        #         )
+        #         if _rec_resp.status_code == 200:
+        #             _fields = _rec_resp.json().get("fields", {})
+        #             per_site_base_id    = (_fields.get("AT Base ID", "") or "").strip() or None
+        #             per_site_table_name = (_fields.get("AT Table Name", "") or "").strip() or None
+        #             per_site_api_key    = (_fields.get("AT API Key", "") or "").strip() or None
+        #             if per_site_base_id:
+        #                 print(f"  [INFO] Using per-site AT config: {per_site_base_id} / {per_site_table_name}")
+        #             else:
+        #                 print(f"  [INFO] No per-site AT config found — using global AIRTABLE_LEADS config")
+        #     except Exception as _e:
+        #         print(f"  [WARN] Could not fetch per-site AT config: {_e}")
+
+        # at_cfg = {
+        #     "api_key":    per_site_api_key    or AIRTABLE_LEADS_CONFIG["api_key"],
+        #     "base_id":    per_site_base_id    or AIRTABLE_LEADS_CONFIG["base_id"],
+        #     "table_name": per_site_table_name or AIRTABLE_LEADS_CONFIG["table_name"],
+        #     "domain":     host,
+        # }
+        # airtable_enabled = bool(at_cfg["api_key"] and at_cfg["base_id"])
+        # airtable_details = {}
+
+        # if airtable_enabled:
+        #     print(f"  >> Running Airtable checks (B1 / B2 / C)...")
+        #     test_email = f"qa+{run_id}@test.com"
+        #     at = await _run_airtable_checks(page, at_cfg, test_email)
+        #     airtable_details = at
+        #     result["airtable_linked"]   = at["airtable_linked"]
+        #     result["api_submission"]    = at["api_submission"]
+        #     result["airtable_verified"] = at["airtable_verified"]
+        # else:
+        #     print(f"  -- Airtable checks skipped (AIRTABLE_LEADS_API_KEY not set)")
 
         # ── Final status ──────────────────────────────────────
         # B1 (JS check) is informational only — does not affect final status
@@ -834,14 +870,61 @@ async def process_domain(browser, domain: str, output_dir: Path, run_id: str, ai
                 result["error"] = " | ".join(reasons)[:500]
                 result["airtable_error"] = result["error"]
 
-        print(
-            f"  [OK] Done -- Gemini: {result['gemini_status']} | "
-            f"Form: {result['form_status']} | "
-            f"Airtable: linked={result['airtable_linked']} "
-            f"api={result['api_submission']} "
-            f"verified={result['airtable_verified']} | "
-            f"Final: {final}"
-        )
+        # ── Human-readable summary ────────────────────────────
+        website_live     = "✅ YES" if not result.get("error","").startswith("Navigation timeout") else "❌ NO — site unreachable"
+        form_found       = "✅ YES" if result["form_status"] != "FAIL" or "not found" not in result.get("form_error","") else "❌ NO"
+        fields_filled    = "✅ YES" if result["form_status"] in ("PASS","FAIL") and "Could not fill" not in result.get("form_error","") else "❌ NO"
+        submit_btn       = "✅ YES" if "Submit button not found" not in result.get("form_error","") else "❌ NO"
+        captcha_note     = "(CAPTCHA blocked direct click — bypassed via API ✅)" if result["form_status"] == "FAIL" and result.get("api_submission") else ""
+        data_in_airtable = "✅ YES — test record successfully stored" if result.get("airtable_verified") else "❌ NO — data did not reach Airtable"
+        airtable_js      = "✅ YES" if result.get("airtable_linked") else "⚠️  Not found (non-critical)"
+        final_emoji      = "✅ PASSED" if final == "PASS" else ("⚠️  PARTIAL" if final == "PARTIAL" else "❌ FAILED")
+
+        print(f"")
+        print(f"  ╔══════════════════════════════════════════════════════")
+        print(f"  ║  QA RESULT SUMMARY — {domain}")
+        print(f"  ╠══════════════════════════════════════════════════════")
+        print(f"  ║  Is the website live and reachable?")
+        print(f"  ║    → {website_live}")
+        print(f"  ║")
+        print(f"  ║  Does a contact form exist on the website?")
+        print(f"  ║    → {'✅ YES — form found and navigated to' if result['form_status'] != 'FAIL' or 'not found' not in result.get('form_error','') else '❌ NO — could not find contact section'}")
+        print(f"  ║")
+        print(f"  ║  Are the input fields (text boxes) working?")
+        print(f"  ║    → {'✅ YES — all fields accepted test data' if 'Could not fill' not in result.get('form_error','') else '❌ NO — fields could not be filled'}")
+        print(f"  ║")
+        print(f"  ║  Is the submit button present?")
+        print(f"  ║    → {'✅ YES — submit button found' if 'Submit button not found' not in result.get('form_error','') else '❌ NO — submit button missing'}")
+        print(f"  ║")
+        print(f"  ║  Was the form submitted with test data?")
+        if result.get("api_submission"):
+            print(f"  ║    → ✅ YES — test data sent directly to Airtable via API")
+            print(f"  ║       (Website has CAPTCHA protection — we bypassed it by")
+            print(f"  ║        calling Airtable directly, just like the real form does)")
+        else:
+            print(f"  ║    → ❌ NO — could not submit test data")
+        print(f"  ║")
+        print(f"  ║  Was the submitted data stored in Airtable?")
+        print(f"  ║    → {data_in_airtable}")
+        print(f"  ║")
+        print(f"  ║  Is the Airtable JS config present on the website?")
+        print(f"  ║    → {airtable_js}")
+        print(f"  ║")
+        print(f"  ╠══════════════════════════════════════════════════════")
+        print(f"  ║  OVERALL RESULT: {final_emoji}")
+        if final == "PASS":
+            print(f"  ║  The website is live and correctly sending")
+            print(f"  ║  contact form data to Airtable. ✅")
+        elif final == "PARTIAL":
+            print(f"  ║  Some checks passed but not all.")
+            print(f"  ║  Manual review recommended. ⚠️")
+        else:
+            print(f"  ║  The website has issues. Check Kontakt error")
+            print(f"  ║  field in Airtable for details. ❌")
+            if result.get("error"):
+                print(f"  ║  Error: {result['error'][:80]}")
+        print(f"  ╚══════════════════════════════════════════════════════")
+        print(f"")
 
     except PlaywrightTimeoutError:
         result["error"] = f"Navigation timeout after {NAVIGATION_TIMEOUT // 1000}s"
