@@ -386,58 +386,124 @@ async def _detect_success(page: Page, had_form_before_submit: bool) -> bool:
 async def submit_form(page: Page, domain: str, run_id: str) -> dict:
     """
     Navigate to the contact section, fill the form, and submit.
-
-    Args:
-        page    : Active Playwright page (already on the domain's homepage).
-        domain  : Domain string e.g. "example.de" (used for URL construction).
-        run_id  : Unique run identifier embedded in the message field.
-
-    Returns:
-        dict: {
-            "status": "PASS" | "FAIL",
-            "error":  str   (empty string on success)
-        }
+    Logs detailed results for each QA requirement.
     """
     base_url = _base_url_from_domain(domain)
     message  = f"QA Test - run_id={run_id}"
 
+    print(f"  ┌─────────────────────────────────────────")
+    print(f"  │ CONTACT FORM QA CHECKS — {domain}")
+    print(f"  ├─────────────────────────────────────────")
+
     try:
-        # Step 1 — Navigate to contact section
+        # ── CHECK 1: Contact form exists? ─────────────────────
         reached = await _navigate_to_contact(page, base_url)
         if not reached:
+            print(f"  │ [1] Contact form exists     : ❌ NOT FOUND")
+            print(f"  │ [2] Input fields functional : ⏭  SKIPPED")
+            print(f"  │ [3] Submit button present   : ⏭  SKIPPED")
+            print(f"  │ [4] Auto-fill test data     : ⏭  SKIPPED")
+            print(f"  │ [5] Submit button clicked   : ⏭  SKIPPED")
+            print(f"  └─────────────────────────────────────────")
             return {"status": "FAIL", "error": "Could not find contact section"}
 
-        # Step 2 — Switch to Serviceanfrage tab if present
+        print(f"  │ [1] Contact form exists     : ✅ FOUND at {page.url}")
+
+        # Switch to Serviceanfrage tab if present
         await _switch_to_serviceanfrage(page)
 
-        # Step 3 — Fill the form
+        # ── CHECK 2: Input fields functional? ─────────────────
         filled = await _fill_form(page, message)
-        print(f"  [INFO] Fields filled: {filled}")
+        filled_fields   = [f for f, ok in filled.items() if ok]
+        unfilled_fields = [f for f, ok in filled.items() if not ok]
+
+        if filled_fields:
+            print(f"  │ [2] Input fields functional : ✅ Filled: {filled_fields}")
+        else:
+            print(f"  │ [2] Input fields functional : ❌ No fields could be filled")
+
+        if unfilled_fields:
+            print(f"  │     Fields not found        : ⚠️  {unfilled_fields}")
+
+        # ── CHECK 4: Auto-fill with test data ─────────────────
+        if filled_fields:
+            print(f"  │ [4] Auto-fill test data     : ✅ Test data injected")
+            print(f"  │     Name={TEST_DATA['name']} | Email={TEST_DATA['email']} | Phone={TEST_DATA['phone']}")
+        else:
+            print(f"  │ [4] Auto-fill test data     : ❌ Could not inject test data")
 
         # Require at minimum: email OR message to be filled
-        # (some forms only have email, some only have message box)
         if not filled.get("email") and not filled.get("message"):
-            missing = [f for f, ok in filled.items() if not ok]
+            print(f"  │ [3] Submit button present   : ⏭  SKIPPED (no fields filled)")
+            print(f"  │ [5] Submit button clicked   : ⏭  SKIPPED")
+            print(f"  └─────────────────────────────────────────")
             return {
                 "status": "FAIL",
-                "error":  f"Could not fill required fields: {missing}",
+                "error":  f"Could not fill required fields: {unfilled_fields}",
             }
 
-        # Step 4 — Submit
+        # ── CHECK 3: Submit button present? ───────────────────
         form_count_before_submit = await page.locator("form").count()
-        submitted = await _submit_form(page)
-        if not submitted:
-            return {"status": "FAIL", "error": "Submit button not found"}
 
-        # Step 5 — Detect success
+        # Check if submit button exists before clicking
+        btn_exists = False
+        for selector in ["button[type='submit']", "input[type='submit']"]:
+            try:
+                el = page.locator(selector).first
+                if await el.count() > 0:
+                    btn_exists = True
+                    break
+            except Exception:
+                pass
+
+        if not btn_exists:
+            # Try text-based button
+            try:
+                import re as _re
+                submit_re = _re.compile(
+                    r"senden|absenden|submit|anfrage|abschicken|bestätigen",
+                    _re.IGNORECASE,
+                )
+                candidate = page.get_by_role("button", name=submit_re).first
+                if await candidate.count() > 0:
+                    btn_exists = True
+            except Exception:
+                pass
+
+        if btn_exists:
+            print(f"  │ [3] Submit button present   : ✅ FOUND")
+        else:
+            print(f"  │ [3] Submit button present   : ⚠️  Not found via standard selectors")
+
+        # ── CHECK 5: Submit button clicked? ───────────────────
+        submitted = await _submit_form(page)
+        if submitted:
+            print(f"  │ [5] Submit button clicked   : ✅ CLICKED")
+        else:
+            print(f"  │ [5] Submit button clicked   : ❌ FAILED — button not clickable")
+            print(f"  └─────────────────────────────────────────")
+            return {"status": "FAIL", "error": "Submit button not found or not clickable"}
+
+        # ── Success detection ──────────────────────────────────
         success = await _detect_success(page, form_count_before_submit > 0)
+        if success:
+            print(f"  │     Success confirmation    : ✅ Detected on page")
+        else:
+            print(f"  │     Success confirmation    : ⚠️  Not detected (CAPTCHA may have blocked)")
+
+        print(f"  └─────────────────────────────────────────")
+
         if success:
             return {"status": "PASS", "error": ""}
         else:
             return {"status": "FAIL", "error": "No success confirmation detected after submit"}
 
     except PlaywrightTimeoutError as e:
+        print(f"  │ ❌ TIMEOUT ERROR: {e}")
+        print(f"  └─────────────────────────────────────────")
         return {"status": "FAIL", "error": f"Timeout: {e}"}
 
     except Exception as e:
+        print(f"  │ ❌ EXCEPTION: {e}")
+        print(f"  └─────────────────────────────────────────")
         return {"status": "FAIL", "error": str(e)}

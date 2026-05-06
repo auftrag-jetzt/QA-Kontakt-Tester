@@ -768,43 +768,11 @@ async def process_domain(browser, domain: str, output_dir: Path, run_id: str, ai
         form_ok   = result["form_status"] == "PASS"
 
         # ── Stage 4: Airtable checks (B1 + B2 + C) ───────────
-        # Try to load per-site credentials from the triggering record's
-        # AT Base ID / AT Table Name / AT API Key fields.
-        per_site_base_id    = None
-        per_site_table_name = None
-        per_site_api_key    = None
-
-        if airtable_record_id:
-            try:
-                _rec_url = (
-                    f"https://api.airtable.com/v0/"
-                    f"{AIRTABLE_TRIGGER_CONFIG['base_id']}/"
-                    f"{AIRTABLE_TRIGGER_CONFIG['table_name']}/"
-                    f"{airtable_record_id}"
-                )
-                _rec_resp = requests.get(
-                    _rec_url,
-                    headers=_airtable_headers(AIRTABLE_TRIGGER_CONFIG["api_key"]),
-                    timeout=10,
-                )
-                if _rec_resp.status_code == 200:
-                    _fields = _rec_resp.json().get("fields", {})
-                    per_site_base_id    = (_fields.get("AT Base ID", "") or "").strip() or None
-                    per_site_table_name = (_fields.get("AT Table Name", "") or "").strip() or None
-                    per_site_api_key    = (_fields.get("AT API Key", "") or "").strip() or None
-                    if per_site_base_id:
-                        print(f"  [INFO] Using per-site AT config: {per_site_base_id} / {per_site_table_name}")
-                    else:
-                        print(f"  [INFO] No per-site AT config found — using global AIRTABLE_LEADS config")
-            except Exception as _e:
-                print(f"  [WARN] Could not fetch per-site AT config: {_e}")
-
-        at_cfg = {
-            "api_key":    per_site_api_key    or AIRTABLE_LEADS_CONFIG["api_key"],
-            "base_id":    per_site_base_id    or AIRTABLE_LEADS_CONFIG["base_id"],
-            "table_name": per_site_table_name or AIRTABLE_LEADS_CONFIG["table_name"],
-            "domain":     host,
-        }
+        # Central Leads Partner table used for all websites.
+        # B1: checks for Airtable JS on the site (informational only)
+        # B2: submits test record directly via API to Leads Partner
+        # C:  verifies test record was stored successfully
+        at_cfg = {**AIRTABLE_LEADS_CONFIG, "domain": host}
         airtable_enabled = bool(at_cfg["api_key"] and at_cfg["base_id"])
         airtable_details = {}
 
