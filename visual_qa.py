@@ -736,8 +736,84 @@ async def process_domain(browser, domain: str, output_dir: Path, run_id: str, ai
         page.set_default_navigation_timeout(NAVIGATION_TIMEOUT)
 
         print(f"  >> Navigating to {url} ...")
-        await page.goto(url, wait_until="domcontentloaded")
+
+        # ── Website liveness check ────────────────────────────
+        response = None
+        try:
+            response = await page.goto(url, wait_until="domcontentloaded")
+        except Exception as nav_err:
+            error_str = str(nav_err).lower()
+            if "err_name_not_resolved" in error_str:
+                msg = "Domain does not exist or DNS lookup failed"
+            elif "err_connection_refused" in error_str:
+                msg = "Server refused connection — site is down"
+            elif "err_connection_timed_out" in error_str or "timeout" in error_str:
+                msg = "Connection timed out — site is unreachable"
+            elif "err_connection_reset" in error_str:
+                msg = "Connection was reset — server error"
+            elif "err_ssl" in error_str or "ssl" in error_str:
+                msg = "SSL certificate error"
+            else:
+                msg = f"Could not reach website: {str(nav_err)[:100]}"
+            result["error"] = msg
+            result["status"] = "FAIL"
+            result["website_live"] = False
+            print(f"  [FAIL] Website unreachable — {msg}")
+            return result
+
         await page.wait_for_timeout(WAIT_AFTER_LOAD)
+
+        # HTTP status check
+        if response and response.status >= 400:
+            msg = f"Website returned HTTP {response.status} — site is down"
+            result["error"] = msg
+            result["status"] = "FAIL"
+            result["website_live"] = False
+            print(f"  [FAIL] {msg}")
+            return result
+
+        # Page content check for common error messages
+        try:
+            page_text = await page.evaluate("document.body ? document.body.innerText : ''")
+            page_text_lower = page_text.lower()[:800]
+            dead_indicators = {
+                "no available server":        "No server available — Coolify app is stopped",
+                "502 bad gateway":            "502 Bad Gateway — server error",
+                "503 service unavailable":    "503 Service Unavailable — server down",
+                "504 gateway timeout":        "504 Gateway Timeout — server not responding",
+                "this site can't be reached": "Site can't be reached",
+                "application error":          "Application crashed",
+                "404 not found":              "404 Not Found",
+                "website coming soon":        "Website not launched yet",
+                "under construction":         "Website under construction",
+                "parked domain":              "Domain is parked — not a real website",
+                "domain for sale":            "Domain is for sale",
+            }
+            for indicator, description in dead_indicators.items():
+                if indicator in page_text_lower:
+                    result["error"] = description
+                    result["status"] = "FAIL"
+                    result["website_live"] = False
+                    print(f"  [FAIL] Website is down — {description}")
+                    return result
+        except Exception:
+            pass
+
+        # Empty page check
+        try:
+            body_length = await page.evaluate("document.body ? document.body.innerHTML.length : 0")
+            if body_length < 100:
+                msg = "Website loaded but page appears empty"
+                result["error"] = msg
+                result["status"] = "FAIL"
+                result["website_live"] = False
+                print(f"  [FAIL] {msg}")
+                return result
+        except Exception:
+            pass
+
+        result["website_live"] = True
+        print(f"  [INFO] Website is live ✅ (HTTP {response.status if response else 'OK'})")
 
         # ── Stage 1: Screenshot ───────────────────────────────
         screenshot_path = await capture_screenshot(page, domain, output_dir)
@@ -832,7 +908,7 @@ async def process_domain(browser, domain: str, output_dir: Path, run_id: str, ai
                 result["airtable_error"] = result["error"]
 
         # ── Human-readable summary ────────────────────────────
-        website_live     = "✅ YES" if not result.get("error","").startswith("Navigation timeout") else "❌ NO — site unreachable"
+        website_live     = "✅ YES" if result.get("website_live", True) else f"❌ NO — {result.get('error', 'site unreachable')}"
         form_found       = "✅ YES" if result["form_status"] != "FAIL" or "not found" not in result.get("form_error","") else "❌ NO"
         fields_filled    = "✅ YES" if result["form_status"] in ("PASS","FAIL") and "Could not fill" not in result.get("form_error","") else "❌ NO"
         submit_btn       = "✅ YES" if "Submit button not found" not in result.get("form_error","") else "❌ NO"
